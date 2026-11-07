@@ -1,0 +1,5 @@
+**/bin/
+**/obj/
+analysis/
+dist/
+*.apks

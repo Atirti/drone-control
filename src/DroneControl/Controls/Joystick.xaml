@@ -1,0 +1,34 @@
+<UserControl
+    x:Class="DroneControl.Controls.Joystick"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Width="180"
+    Height="180"
+    Focusable="False"
+    Stylus.IsPressAndHoldEnabled="False"
+    Stylus.IsFlicksEnabled="False">
+    <UserControl.Style>
+        <Style TargetType="UserControl">
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.45" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Style>
+
+    <Grid x:Name="Surface" Background="Transparent" Cursor="Hand">
+        <Ellipse Margin="8" Fill="{DynamicResource MaterialDesign.Brush.Primary}" Opacity="0.08" />
+        <Ellipse Margin="8" Stroke="{DynamicResource MaterialDesign.Brush.Primary}" StrokeThickness="2" Opacity="0.5" />
+        <Ellipse Margin="44" Stroke="{DynamicResource MaterialDesign.Brush.Primary}" Opacity="0.2" />
+        <Path Data="M 90,14 L 90,166 M 14,90 L 166,90"
+              Stroke="{DynamicResource MaterialDesign.Brush.Foreground}" Opacity="0.15" />
+        <Ellipse Width="44" Height="44"
+                 Fill="{DynamicResource MaterialDesign.Brush.Primary}"
+                 Stroke="{DynamicResource MaterialDesign.Brush.Primary.Foreground}" StrokeThickness="2">
+            <Ellipse.RenderTransform>
+                <TranslateTransform x:Name="KnobOffset" />
+            </Ellipse.RenderTransform>
+        </Ellipse>
+    </Grid>
+</UserControl>
