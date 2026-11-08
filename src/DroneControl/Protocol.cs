@@ -2,24 +2,13 @@ using System.Buffers.Binary;
 
 namespace DroneControl;
 
-public enum DroneProfile
-{
-    Tx,
-    Bl
-}
-
 [Flags]
 public enum FlightFlags : byte
 {
     None = 0,
     Takeoff = 1,
     Land = 2,
-    Stop = 4,
-    Flip = 8,
-    Headless = 16,
-    Unlock = 32,
-    Light = 64,
-    Calibrate = 128
+    Stop = 4
 }
 
 /// <summary>Формирование полётных команд и транспортных оболочек без сетевого ввода-вывода.</summary>
@@ -49,14 +38,9 @@ public static class Protocol
         return packet;
     }
 
-    /// <summary>Добавляет TX-префикс либо 12-байтовый заголовок BL с sequence.</summary>
-    public static byte[] Wrap(DroneProfile profile, byte[] payload, uint sequence)
+    /// <summary>Добавляет 12-байтовый заголовок BL с sequence.</summary>
+    public static byte[] Wrap(byte[] payload, uint sequence)
     {
-        if (profile == DroneProfile.Tx)
-        {
-            return [3, .. payload];
-        }
-
         var packet = new byte[12 + payload.Length];
         packet[0] = 0xef;
         packet[1] = 4;
@@ -67,8 +51,7 @@ public static class Protocol
         return packet;
     }
 
-    public static byte[] Heartbeat(DroneProfile profile) =>
-        profile == DroneProfile.Tx ? [1, 1] : [0xef, 0, 4, 0];
+    public static byte[] Heartbeat() => [0xef, 0, 4, 0];
 
     /// <summary>Проверяет только BL-маркер и длину. Полезную нагрузку проверяет её потребитель.</summary>
     public static bool ValidBl(ReadOnlySpan<byte> packet) =>

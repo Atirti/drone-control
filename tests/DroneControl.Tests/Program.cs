@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using DroneControl;
+using DroneVideoBridge;
+using System.Text;
 
 int checks = 0;
 
@@ -18,6 +20,8 @@ void Check(bool condition, string name)
 
 VerifyProtocol();
 VerifyFlightInput();
+VerifyGamepadInput();
+await VerifyHttpRequestsAsync();
 
 if (!args.Contains("--input-only"))
 {
@@ -32,8 +36,7 @@ void VerifyProtocol()
     Check(Convert.ToHexString(Protocol.Flight()) == "6680808080000099", "APK neutral vector");
     Check(Convert.ToHexString(Protocol.Flight(flags: FlightFlags.Takeoff)) == "6680808080010199", "APK takeoff vector");
     Check(Convert.ToHexString(Protocol.Flight(throttle: 0, flags: FlightFlags.Stop)) == "6680800080048499", "emergency vector");
-    Check(Convert.ToHexString(Protocol.Wrap(DroneProfile.Tx, Protocol.Flight(), 1)) == "036680808080000099", "TX wrapper");
-    Check(Convert.ToHexString(Protocol.Wrap(DroneProfile.Bl, Protocol.Flight(), 1)) == "EF04140001000000080000006680808080000099", "BL native wrapper");
+    Check(Convert.ToHexString(Protocol.Wrap(Protocol.Flight(), 1)) == "EF04140001000000080000006680808080000099", "BL native wrapper");
     Check(
         Protocol.Flight(-3, 500, 1, 0).SequenceEqual(new byte[] { 102, 1, 255, 0, 1, 0, 255, 153 }),
         "clamps and throttle special case");
@@ -107,41 +110,111 @@ void VerifyFlightInput()
     Check(StickPosition.Normalize(double.NaN, 1).IsCentered, "nonfinite input resets to neutral");
 }
 
+void VerifyGamepadInput()
+{
+    Check(GamepadInput.Normalize(0, 0).IsCentered, "gamepad neutral");
+    Check(GamepadInput.Normalize(5000, -1000).IsCentered, "gamepad drift suppressed");
+    Check(GamepadInput.Normalize(short.MaxValue, 0).X == 1, "SDL right endpoint");
+    Check(GamepadInput.Normalize(short.MinValue, 0).X == -1, "SDL left endpoint");
+    Check(GamepadInput.Normalize(0, short.MinValue).Y == 1, "SDL up reverses Y");
+    Check(GamepadInput.Normalize(0, short.MaxValue).Y == -1, "SDL down reverses Y");
+    Check(GamepadInput.Normalize(5898, 0).IsCentered, "dead zone inner boundary");
+    var edge = GamepadInput.Normalize(5899, 0);
+    Check(edge.X > 0 && edge.X < 0.001, "dead zone continuous outer boundary");
+    var half = GamepadInput.Normalize(16384, 0);
+    Check(half.X > 0.39 && half.X < 0.40, "remaining stick travel scaled proportionally");
+    var diagonal = GamepadInput.Normalize(short.MaxValue, short.MinValue);
+    Check(Math.Abs(diagonal.X - Math.Sqrt(0.5)) < 0.00001 && diagonal.Y == diagonal.X,
+        "gamepad diagonal bounded to unit circle");
+
+    var input = new FlightInput();
+    input.SetLeft(GamepadInput.Normalize(short.MaxValue, 0));
+    input.SetRight(GamepadInput.Normalize(0, short.MinValue));
+    Check(input.Packet(100).SequenceEqual(Protocol.Flight(pitch: 255, yaw: 255)),
+        "SDL sticks mapped to simultaneous yaw and pitch");
+
+    var gate = new GamepadInput();
+    var centered = new GamepadState(1, "Test", default, default);
+    var moving = centered with { Left = new StickPosition(1, 0) };
+    bool Update(GamepadState? state, int milliseconds) => gate.Update(state, TimeSpan.FromMilliseconds(milliseconds));
+
+    Check(!Update(moving, 0), "held stick blocked on activation");
+    Check(!Update(centered, 100) && !Update(centered, 399), "neutral must last 300 ms");
+    Check(Update(centered, 400) && Update(moving, 450), "center unlocks movement");
+    Check(!Update(null, 500) && !gate.IsReady, "disconnect closes input gate");
+    Check(!Update(moving, 600), "held stick blocked after reconnect");
+    Check(!Update(centered, 700) && !Update(moving, 900) && !Update(centered, 1000) &&
+          !Update(centered, 1299) && Update(centered, 1300), "interrupted centering restarts timer");
+    Check(!Update(centered with { DeviceId = 2 }, 1400) &&
+          !Update(moving with { DeviceId = 2 }, 1500), "replacement requires new centering");
+    gate.Reset();
+    Check(!Update(centered, 2000) && !Update(centered, 2299) && Update(centered, 2300),
+        "focus or source reset requires full centering");
+}
+
 async Task VerifyTransportAsync()
 {
     using var server = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
     int port = ((IPEndPoint)server.Client.LocalEndPoint!).Port;
-    await using (var link = new DroneLink(DroneProfile.Tx, "127.0.0.1", port, false))
+    await using (var link = new DroneLink("127.0.0.1", port))
     {
+        Check(server.Available == 0 && !link.HasControlActivity, "opening link sends no commands");
         var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        link.Packet += packet => received.TrySetResult(packet);
-        await link.Send(Protocol.Heartbeat(DroneProfile.Tx));
+        link.Reply = packet =>
+        {
+            received.TrySetResult(packet);
+            return null;
+        };
+        await link.Send(Protocol.Heartbeat());
         var datagram = await server.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2));
-        Check(datagram.Buffer.SequenceEqual(new byte[] { 1, 1 }), "UDP heartbeat loopback");
-        await server.SendAsync(new byte[] { 24, 0 }, datagram.RemoteEndPoint);
+        Check(datagram.Buffer.SequenceEqual(new byte[] { 0xef, 0, 4, 0 }), "BL heartbeat loopback");
+        // Видеопорт отличается от порта, на который клиент отправляет запросы.
+        using var videoPort = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        await videoPort.SendAsync(new byte[] { 0x93, 1, 4, 0 }, datagram.RemoteEndPoint);
         await received.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Check(link.Responding, "UDP reply enables response status");
+        Check(link.Responding && link.Received == 1, "BL accepts reply from a different source port");
         await Task.Delay(3100);
         Check(!link.Responding, "stale reply timeout");
+
+        var control = link.Control(Protocol.Flight());
+        Check(link.HasControlActivity, "control activity visible before awaiting send");
+        await control;
+        var command = await server.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Check(Convert.ToHexString(command.Buffer) == "EF04140001000000080000006680808080000099",
+            "real transport wraps first command with sequence 1");
     }
 
-    await using (var simulation = new DroneLink(DroneProfile.Bl, "127.0.0.1", port, true))
+    var failingLink = new DroneLink("127.0.0.1", port);
+    try
     {
-        await simulation.Control(Protocol.Flight());
-        Check(simulation.Sent == 1 && server.Available == 0, "simulation does not send UDP");
-    }
-
-    await using (var bl = new DroneLink(DroneProfile.Bl, "127.0.0.1", port, false))
-    {
-        var reply = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        bl.Packet += packet => reply.TrySetResult(packet);
-        await bl.Send(Protocol.Heartbeat(DroneProfile.Bl));
+        var failed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        failingLink.Error += message => failed.TrySetResult(message);
+        failingLink.Reply = _ => throw new InvalidOperationException("test receive failure");
+        await failingLink.Send(Protocol.Heartbeat());
         var datagram = await server.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(2));
-        using var videoPort = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        await videoPort.SendAsync(new byte[] { 147, 1, 4, 0 }, datagram.RemoteEndPoint);
-        await reply.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Check(bl.Received == 1, "BL receives video from different source port");
+        await server.SendAsync(new byte[] { 0x93, 1, 4, 0 }, datagram.RemoteEndPoint);
+        await failed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check(!failingLink.Responding, "receive failure immediately clears response status");
     }
+    finally
+    {
+        await failingLink.DisposeAsync();
+        await failingLink.DisposeAsync();
+    }
+    Check(!failingLink.Responding, "repeated disposal is safe and link stays inactive");
+}
+
+async Task VerifyHttpRequestsAsync()
+{
+    using var valid = new FragmentedStream(Encoding.ASCII.GetBytes("GET /video.mjpg HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    Check(await MjpegRequest.IsVideoRequestAsync(valid, CancellationToken.None), "fragmented HTTP headers accepted");
+    using var wrongPath = new MemoryStream("GET / HTTP/1.1\r\n\r\n"u8.ToArray());
+    Check(!await MjpegRequest.IsVideoRequestAsync(wrongPath, CancellationToken.None), "other HTTP path rejected");
+    using var incomplete = new MemoryStream("GET /video.mjpg HTTP/1.1\r\nHost: local"u8.ToArray());
+    Check(!await MjpegRequest.IsVideoRequestAsync(incomplete, CancellationToken.None), "truncated HTTP headers rejected");
+    using var oversized = new MemoryStream(Enumerable.Repeat((byte)'A', 10000).ToArray());
+    Check(!await MjpegRequest.IsVideoRequestAsync(oversized, CancellationToken.None) && oversized.Position == 8192,
+        "unterminated HTTP line cannot read beyond 8 KiB");
 }
 
 void VerifyFrameAssembly()
@@ -187,3 +260,8 @@ void VerifyFrameAssembly()
         "BL complete-frame ACK");
 }
 
+sealed class FragmentedStream(byte[] data) : MemoryStream(data)
+{
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+        base.ReadAsync(buffer[..Math.Min(3, buffer.Length)], cancellationToken);
+}

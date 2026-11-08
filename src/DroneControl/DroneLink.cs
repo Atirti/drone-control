@@ -4,79 +4,54 @@ using System.Net.Sockets;
 
 namespace DroneControl;
 
-/// <summary>UDP-транспорт. События вызываются из цикла приёма, без отдельной диспетчеризации.</summary>
+/// <summary>BL UDP-транспорт. Обработчик пакета вызывается последовательно из цикла приёма.</summary>
 public sealed class DroneLink : IAsyncDisposable
 {
-    private readonly UdpClient? socket;
+    private readonly UdpClient socket;
     private readonly IPEndPoint remoteEndpoint;
     private readonly CancellationTokenSource shutdown = new();
     private readonly Task receiveTask;
     private long lastReceiveTimestamp;
+    private long receivedPackets;
     private uint commandSequence;
+    private Task? disposeTask;
 
-    public DroneProfile Profile
+    public long Received => Interlocked.Read(ref receivedPackets);
+
+    /// <summary>Полётная отправка уже начиналась, поэтому при отключении нужна попытка нейтрали.</summary>
+    public bool HasControlActivity { get; private set; }
+
+    public bool Responding
     {
-        get;
-    }
-    public bool Simulation
-    {
-        get;
-    }
-    public long Sent
-    {
-        get;
-        private set;
-    }
-    public long Received
-    {
-        get;
-        private set;
-    }
-    public long ControlsSent
-    {
-        get;
-        private set;
+        get
+        {
+            long timestamp = Interlocked.Read(ref lastReceiveTimestamp);
+            return !receiveTask.IsCompleted && timestamp > 0 &&
+                   Stopwatch.GetElapsedTime(timestamp).TotalSeconds < 3;
+        }
     }
 
-    /// <summary>Есть принятый пакет не старше трёх секунд либо включена симуляция.</summary>
-    public bool Responding => Simulation ||
-        (Interlocked.Read(ref lastReceiveTimestamp) > 0 &&
-         Stopwatch.GetElapsedTime(Interlocked.Read(ref lastReceiveTimestamp)).TotalSeconds < 3);
-
-    public event Action<byte[]>? Packet;
     public event Action<string>? Error;
 
     /// <summary>Единственный синхронный обработчик, возвращающий ACK или null.</summary>
-    public event Func<byte[], byte[]?>? Reply;
+    public Func<byte[], byte[]?>? Reply { get; set; }
 
-    public DroneLink(DroneProfile profile, string host, int port, bool simulation)
+    public DroneLink(string host, int port)
     {
-        Profile = profile;
-        Simulation = simulation;
         remoteEndpoint = new IPEndPoint(IPAddress.Parse(host), port);
-        if (!simulation)
-        {
-            // Connect отфильтрует BL-видео: запросы идут на 8800, ответы приходят с 1234.
-            socket = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-        }
-
-        receiveTask = simulation ? Task.CompletedTask : ReceiveAsync();
+        // Connect отфильтрует видео: запросы идут на 8800, ответы приходят с 1234.
+        socket = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
+        receiveTask = ReceiveAsync();
     }
 
-    public async Task Send(byte[] data)
-    {
-        if (socket != null)
-        {
-            await socket.SendAsync(data, remoteEndpoint, shutdown.Token);
-        }
-
-        Sent++;
-    }
+    public async Task Send(byte[] data) =>
+        await socket.SendAsync(data, remoteEndpoint, shutdown.Token);
 
     public async Task Control(byte[] payload)
     {
-        await Send(Protocol.Wrap(Profile, payload, ++commandSequence));
-        ControlsSent++;
+        // Сброс ввода может произойти во время await первой отправки.
+        HasControlActivity = true;
+        await Send(Protocol.Wrap(payload, ++commandSequence));
     }
 
     private async Task ReceiveAsync()
@@ -85,63 +60,54 @@ public sealed class DroneLink : IAsyncDisposable
         {
             while (!shutdown.IsCancellationRequested)
             {
-                var result = await socket!.ReceiveAsync(shutdown.Token);
-                if (!result.RemoteEndPoint.Address.Equals(remoteEndpoint.Address))
-                {
-                    continue;
-                }
-
-                if (Profile == DroneProfile.Tx && result.RemoteEndPoint.Port != remoteEndpoint.Port)
-                {
-                    continue;
-                }
-
-                if (Profile == DroneProfile.Bl && !Protocol.ValidBl(result.Buffer))
-                {
-                    continue;
-                }
-
-                if (result.Buffer.Length == 0)
+                var result = await socket.ReceiveAsync(shutdown.Token);
+                if (!result.RemoteEndPoint.Address.Equals(remoteEndpoint.Address) ||
+                    !Protocol.ValidBl(result.Buffer))
                 {
                     continue;
                 }
 
                 Interlocked.Exchange(ref lastReceiveTimestamp, Stopwatch.GetTimestamp());
-                Received++;
-                Packet?.Invoke(result.Buffer);
-
+                Interlocked.Increment(ref receivedPackets);
                 var reply = Reply?.Invoke(result.Buffer);
                 if (reply != null)
                 {
                     await Send(reply);
                 }
 
-                // Подтверждение входящего управляющего сообщения BL; это не полётная команда.
-                if (Profile == DroneProfile.Bl && result.Buffer.Length >= 12 && result.Buffer[1] == 3)
+                // Подтверждение сообщения BL, не полётная команда.
+                if (result.Buffer.Length >= 12 && result.Buffer[1] == 3)
                 {
                     await Send([0xef, 8, 8, 0, .. result.Buffer[4..8]]);
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
         {
-            // DisposeAsync отменяет ожидающий ReceiveAsync.
         }
-        catch (ObjectDisposedException)
+        catch (ObjectDisposedException) when (shutdown.IsCancellationRequested)
         {
-            // Сокет закрывается при отключении.
         }
         catch (Exception ex)
         {
+            Interlocked.Exchange(ref lastReceiveTimestamp, 0);
             Error?.Invoke(ex.Message);
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => new(disposeTask ??= CloseAsync());
+
+    private async Task CloseAsync()
     {
         shutdown.Cancel();
-        socket?.Dispose();
-        await receiveTask;
-        shutdown.Dispose();
+        socket.Dispose();
+        try
+        {
+            await receiveTask;
+        }
+        finally
+        {
+            shutdown.Dispose();
+        }
     }
 }

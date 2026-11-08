@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using DroneControl;
+using DroneVideoBridge;
 
 // Video-only bridge: no calls to Control(), no flight packets.
 using var shutdown = new CancellationTokenSource();
@@ -24,19 +25,14 @@ if (seconds > 0)
 var frameAssembler = new BlFrames();
 byte[]? latestFrame = null;
 long frameCount = 0;
-await using var drone = new DroneLink(DroneProfile.Bl, "192.168.169.1", 8800, false);
-drone.Reply += packet =>
+await using var drone = new DroneLink("192.168.169.1", 8800);
+drone.Reply = packet =>
 {
     var jpeg = frameAssembler.Push(packet);
     if (jpeg != null)
     {
         Interlocked.Exchange(ref latestFrame, jpeg);
-        var receivedFrameCount = Interlocked.Increment(ref frameCount);
-        if (receivedFrameCount == 1)
-        {
-            File.WriteAllBytes(Path.Combine(AppContext.BaseDirectory, "first-frame.jpg"), jpeg);
-            Console.WriteLine($"First JPEG: {jpeg.Length} bytes");
-        }
+        Interlocked.Increment(ref frameCount);
     }
 
     return frameAssembler.Acknowledgement;
@@ -55,33 +51,20 @@ async Task ServeClientAsync(TcpClient client)
             var stream = client.GetStream();
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
             deadline.CancelAfter(TimeSpan.FromSeconds(5));
-            using var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
-            var request = await reader.ReadLineAsync(deadline.Token);
-            if (request == null || !request.StartsWith("GET /video.mjpg "))
+            if (!await MjpegRequest.IsVideoRequestAsync(stream, deadline.Token))
             {
                 await stream.WriteAsync(Encoding.ASCII.GetBytes(
                     "HTTP/1.1 404 Not Found\r\n" +
                     "Content-Length: 0\r\n" +
-                    "Connection: close\r\n\r\n"), shutdown.Token);
+                    "Connection: close\r\n\r\n"), deadline.Token);
                 return;
-            }
-
-            int headerBytes = request.Length;
-            string? line;
-            while ((line = await reader.ReadLineAsync(deadline.Token)) is { Length: > 0 })
-            {
-                headerBytes += line.Length;
-                if (headerBytes > 8192)
-                {
-                    return;
-                }
             }
 
             await stream.WriteAsync(Encoding.ASCII.GetBytes(
                 "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n" +
                 "Cache-Control: no-store\r\n" +
-                "Connection: close\r\n\r\n"), shutdown.Token);
+                "Connection: close\r\n\r\n"), deadline.Token);
             byte[]? previousFrame = null;
             while (!shutdown.IsCancellationRequested)
             {
@@ -136,7 +119,7 @@ try
     int heartbeatCount = 0;
     do
     {
-        await drone.Send(Protocol.Heartbeat(DroneProfile.Bl));
+        await drone.Send(Protocol.Heartbeat());
         if (++heartbeatCount % 45 == 0)
         {
             Console.WriteLine($"Packets={drone.Received} Frames={Interlocked.Read(ref frameCount)}");
@@ -155,4 +138,3 @@ finally
     await Task.WhenAll(clients);
     Console.WriteLine($"Stopped. Packets={drone.Received} Frames={frameCount}");
 }
-

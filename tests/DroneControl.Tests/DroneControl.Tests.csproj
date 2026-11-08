@@ -7,9 +7,10 @@
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="../../src/DroneControl/FlightInput.cs" Link="FlightInput.cs" />
+        <Compile Include="../../src/DroneControl/GamepadInput.cs" Link="GamepadInput.cs" />
         <Compile Include="../../src/DroneControl/Protocol.cs" Link="Protocol.cs" />
         <Compile Include="../../src/DroneControl/DroneLink.cs" Link="DroneLink.cs" />
         <Compile Include="../../src/DroneControl/BlFrames.cs" Link="BlFrames.cs" />
+        <Compile Include="../../src/DroneVideoBridge/MjpegRequest.cs" Link="MjpegRequest.cs" />
     </ItemGroup>
 </Project>
-

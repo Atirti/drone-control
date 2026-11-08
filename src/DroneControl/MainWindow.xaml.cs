@@ -16,10 +16,12 @@ public partial class MainWindow : Window
         Interval = TimeSpan.FromMilliseconds(50)
     };
     private readonly FlightInput flightInput = new();
+    private readonly SdlGamepad gamepad = new();
+    private readonly GamepadInput gamepadInput = new();
     private DroneLink? droneLink;
     private FlightFlags activeCommand;
-    private DateTime commandExpiresAt;
-    private DateTime nextHeartbeatAt;
+    private long commandExpiresAt;
+    private long nextHeartbeatAt;
     private bool isTickRunning;
     private bool isDisconnecting;
     private bool isCloseComplete;
@@ -48,9 +50,9 @@ public partial class MainWindow : Window
         try
         {
             var assembler = new BlFrames();
-            var connection = new DroneLink(DroneProfile.Bl, "192.168.169.1", 8800, false);
+            var connection = new DroneLink("192.168.169.1", 8800);
             droneLink = connection;
-            connection.Reply += packet =>
+            connection.Reply = packet =>
             {
                 var jpeg = assembler.Push(packet);
                 if (jpeg != null)
@@ -68,7 +70,7 @@ public partial class MainWindow : Window
                     Notice("Ошибка связи: " + message);
                 }
             });
-            nextHeartbeatAt = DateTime.MinValue;
+            nextHeartbeatAt = 0;
             ConnectButton.Content = "Отключить";
             StopButton.IsEnabled = true;
             StatusText.Text = "Подключение…";
@@ -90,17 +92,27 @@ public partial class MainWindow : Window
         isTickRunning = true;
         try
         {
-            Armed.IsEnabled = droneLink?.Responding == true;
+            try
+            {
+                UpdateGamepadInput();
+            }
+            catch (Exception ex)
+            {
+                Armed.IsChecked = false;
+                ResetInput();
+                Notice("Ошибка ввода: " + ex.Message);
+                // Ошибка геймпада не должна блокировать heartbeat и аварийную остановку.
+            }
             if (droneLink == null)
             {
                 return;
             }
 
-            var now = DateTime.UtcNow;
+            long now = Environment.TickCount64;
             if (now >= nextHeartbeatAt)
             {
-                await droneLink.Send(Protocol.Heartbeat(DroneProfile.Bl));
-                nextHeartbeatAt = now.AddMilliseconds(110);
+                await droneLink.Send(Protocol.Heartbeat());
+                nextHeartbeatAt = now + 110;
             }
 
             if (!droneLink.Responding && Armed.IsChecked == true)
@@ -123,8 +135,9 @@ public partial class MainWindow : Window
                 var packet = emergency
                     ? Protocol.Flight(throttle: 0, flags: FlightFlags.Stop)
                     : flightInput.Packet(Power.Value, command);
-                await droneLink.Control(packet);
+                // Не затираем новый запрос нейтрали, пришедший во время await.
                 shouldSendNeutral = false;
+                await droneLink.Control(packet);
             }
 
             StatusText.Text = droneLink.Responding ? "Подключён" : "Ожидание ответа дрона…";
@@ -143,7 +156,7 @@ public partial class MainWindow : Window
 
     private void UpdateScreenStick(StickPosition position, bool isLeft)
     {
-        if (Armed.IsChecked != true || !IsActive || isDisconnecting)
+        if (IsGamepadMode || Armed.IsChecked != true || !IsActive || isDisconnecting)
         {
             return;
         }
@@ -161,13 +174,79 @@ public partial class MainWindow : Window
     private void RefreshInputAvailability()
     {
         bool enabled = Armed.IsChecked == true;
-        LeftStick.IsEnabled = enabled;
-        RightStick.IsEnabled = enabled;
-        FlightControls.IsEnabled = enabled;
+        // В режиме геймпада стики служат индикаторами даже без подключения к дрону.
+        LeftStick.IsEnabled = enabled || IsGamepadMode;
+        RightStick.IsEnabled = enabled || IsGamepadMode;
+        LeftStick.IsHitTestVisible = enabled && !IsGamepadMode;
+        RightStick.IsHitTestVisible = enabled && !IsGamepadMode;
+        FlightControls.IsEnabled = enabled && (!IsGamepadMode || gamepadInput.IsReady);
+    }
+
+    private bool IsGamepadMode => InputSource.SelectedIndex == 1;
+    private bool IsStopping => activeCommand == FlightFlags.Stop && Environment.TickCount64 < commandExpiresAt;
+
+    private void InputSourceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Первое событие приходит во время загрузки XAML, до создания Armed.
+        if (Armed == null)
+        {
+            return;
+        }
+
+        Armed.IsChecked = false;
+        ResetInput();
+        RefreshInputAvailability();
+        InputStatusText.Text = IsGamepadMode
+            ? "Поиск геймпада…"
+            : "Перетаскивайте стики мышью или пальцами.";
+    }
+
+    private void UpdateGamepadInput()
+    {
+        if (!IsGamepadMode)
+        {
+            Armed.IsEnabled = droneLink?.Responding == true && !IsStopping;
+            InputStatusText.Text = "Перетаскивайте стики мышью или пальцами.";
+            return;
+        }
+
+        var snapshot = gamepad.Read();
+        Armed.IsEnabled = droneLink?.Responding == true && snapshot.HasValue && !IsStopping;
+        if (snapshot is not { } state)
+        {
+            if (Armed.IsChecked == true)
+            {
+                Armed.IsChecked = false;
+                Notice("Геймпад отключён. Управление выключено.");
+            }
+
+            ResetInput();
+            InputStatusText.Text = gamepad.Error ?? "Геймпад не найден. Подключите его к Windows.";
+            return;
+        }
+
+        LeftStick.Display(state.Left);
+        RightStick.Display(state.Right);
+        if (Armed.IsChecked != true || !IsActive)
+        {
+            gamepadInput.Reset();
+            flightInput.Release();
+            InputStatusText.Text = state.Name + "\nСтики работают. Управление выключено.";
+            return;
+        }
+
+        bool ready = gamepadInput.Update(state, TimeSpan.FromMilliseconds(Environment.TickCount64));
+        flightInput.SetLeft(ready ? state.Left : default);
+        flightInput.SetRight(ready ? state.Right : default);
+        FlightControls.IsEnabled = ready;
+        InputStatusText.Text = state.Name + (ready
+            ? "\nУправление стиками включено."
+            : "\nОтпустите оба стика на 0,3 секунды.");
     }
 
     private void ResetInput()
     {
+        gamepadInput.Reset();
         LeftStick?.ResetInput();
         RightStick?.ResetInput();
         flightInput.Release();
@@ -175,8 +254,14 @@ public partial class MainWindow : Window
 
     private void ArmChanged(object sender, RoutedEventArgs e)
     {
+        if (Armed.IsChecked == true && IsStopping)
+        {
+            Armed.IsChecked = false;
+            return;
+        }
+
         ResetInput();
-        activeCommand = 0;
+        activeCommand = IsStopping ? FlightFlags.Stop : FlightFlags.None;
         if (FlightControls != null)
         {
             RefreshInputAvailability();
@@ -184,31 +269,25 @@ public partial class MainWindow : Window
 
         if (Armed.IsChecked != true)
         {
-            shouldSendNeutral = droneLink?.ControlsSent > 0;
+            shouldSendNeutral = droneLink?.HasControlActivity == true;
         }
     }
 
     private void FocusLost(object? sender, EventArgs e)
     {
         // ArmChanged очищает команду; остановку сохраняем даже при смене фокуса.
-        bool stopping = activeCommand == FlightFlags.Stop;
+        bool stopping = IsStopping;
         Armed.IsChecked = false;
         ResetInput();
-        if (stopping)
-        {
-            activeCommand = FlightFlags.Stop;
-        }
-        if (activeCommand != FlightFlags.Stop)
-        {
-            activeCommand = 0;
-        }
+        activeCommand = stopping ? FlightFlags.Stop : FlightFlags.None;
 
-        shouldSendNeutral = droneLink?.ControlsSent > 0;
+        shouldSendNeutral = droneLink?.HasControlActivity == true;
     }
 
     private void ActionClicked(object sender, RoutedEventArgs e)
     {
-        if (droneLink?.Responding != true || Armed.IsChecked != true)
+        if (droneLink?.Responding != true || Armed.IsChecked != true || IsStopping ||
+            (IsGamepadMode && !gamepadInput.IsReady))
         {
             return;
         }
@@ -216,7 +295,7 @@ public partial class MainWindow : Window
         ResetInput();
         RefreshInputAvailability();
         activeCommand = (FlightFlags)byte.Parse((string)((Button)sender).Tag);
-        commandExpiresAt = DateTime.UtcNow.AddSeconds(1);
+        commandExpiresAt = Environment.TickCount64 + 1000;
         Notice(activeCommand == FlightFlags.Takeoff ? "Отправляется команда взлёта." : "Отправляется команда посадки.");
     }
 
@@ -225,7 +304,8 @@ public partial class MainWindow : Window
         ResetInput();
         Armed.IsChecked = false;
         activeCommand = FlightFlags.Stop;
-        commandExpiresAt = DateTime.UtcNow.AddSeconds(1);
+        commandExpiresAt = Environment.TickCount64 + 1000;
+        Armed.IsEnabled = false;
         Notice("Отправляется остановка моторов. При потере связи доставка не гарантируется.");
     }
 
@@ -254,7 +334,7 @@ public partial class MainWindow : Window
                 droneLink = null;
                 try
                 {
-                    if (connectionToClose.ControlsSent > 0)
+                    if (connectionToClose.HasControlActivity)
                     {
                         await connectionToClose.Control(Protocol.Flight());
                         await connectionToClose.Control([101]);
@@ -298,6 +378,7 @@ public partial class MainWindow : Window
 
         await Disconnect();
         controlTimer.Stop();
+        gamepad.Dispose();
         isCloseComplete = true;
         Close();
     }

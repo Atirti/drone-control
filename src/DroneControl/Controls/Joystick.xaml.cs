@@ -21,7 +21,7 @@ public partial class Joystick : UserControl
     }
 
     /// <summary>Меняет положение ручки без события ввода.</summary>
-    private void Display(StickPosition position)
+    public void Display(StickPosition position)
     {
         KnobOffset.X = position.X * Travel;
         KnobOffset.Y = -position.Y * Travel;
