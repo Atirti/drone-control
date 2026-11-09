@@ -18,13 +18,13 @@
     </UserControl.Style>
 
     <Grid x:Name="Surface" Background="Transparent" Cursor="Hand">
-        <Ellipse Margin="8" Fill="{DynamicResource MaterialDesign.Brush.Primary}" Opacity="0.08" />
-        <Ellipse Margin="8" Stroke="{DynamicResource MaterialDesign.Brush.Primary}" StrokeThickness="2" Opacity="0.5" />
-        <Ellipse Margin="44" Stroke="{DynamicResource MaterialDesign.Brush.Primary}" Opacity="0.2" />
+        <Ellipse Margin="8" Fill="{DynamicResource MaterialDesign.Brush.Primary}" Opacity="0.5" />
+        <Ellipse Margin="8" Stroke="{DynamicResource MaterialDesign.Brush.Secondary}" StrokeThickness="2" Opacity="1" />
+        <Ellipse Margin="44" Stroke="{DynamicResource MaterialDesign.Brush.Secondary}" Opacity="0.5" />
         <Path Data="M 90,14 L 90,166 M 14,90 L 166,90"
               Stroke="{DynamicResource MaterialDesign.Brush.Foreground}" Opacity="0.15" />
         <Ellipse Width="44" Height="44"
-                 Fill="{DynamicResource MaterialDesign.Brush.Primary}"
+                 Fill="{DynamicResource MaterialDesign.Brush.Secondary}"
                  Stroke="{DynamicResource MaterialDesign.Brush.Primary.Foreground}" StrokeThickness="2">
             <Ellipse.RenderTransform>
                 <TranslateTransform x:Name="KnobOffset" />
