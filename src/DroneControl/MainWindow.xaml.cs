@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private readonly FlightInput flightInput = new();
     private readonly SdlGamepad gamepad = new();
     private readonly GamepadInput gamepadInput = new();
+    private readonly GamepadButtonInput gamepadButtons = new();
     private DroneLink? droneLink;
     private FlightFlags activeCommand;
     private long commandExpiresAt;
@@ -100,6 +101,7 @@ public partial class MainWindow : Window
             {
                 Armed.IsChecked = false;
                 ResetInput();
+                gamepadButtons.Reset();
                 Notice("Ошибка ввода: " + ex.Message);
                 // Ошибка геймпада не должна блокировать heartbeat и аварийную остановку.
             }
@@ -194,6 +196,7 @@ public partial class MainWindow : Window
         }
 
         Armed.IsChecked = false;
+        gamepadButtons.Reset();
         ResetInput();
         RefreshInputAvailability();
         InputStatusText.Text = IsGamepadMode
@@ -221,12 +224,19 @@ public partial class MainWindow : Window
             }
 
             ResetInput();
+            gamepadButtons.Reset();
             InputStatusText.Text = gamepad.Error ?? "Геймпад не найден. Подключите его к Windows.";
             return;
         }
 
         LeftStick.Display(state.Left);
         RightStick.Display(state.Right);
+        bool ready = Armed.IsChecked == true && IsActive &&
+            gamepadInput.Update(state, TimeSpan.FromMilliseconds(Environment.TickCount64));
+        var actions = gamepadButtons.Update(state, IsActive,
+            canFly: ready && droneLink?.Responding == true && !IsStopping);
+        ApplyGamepadActions(actions);
+
         if (Armed.IsChecked != true || !IsActive)
         {
             gamepadInput.Reset();
@@ -235,13 +245,40 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool ready = gamepadInput.Update(state, TimeSpan.FromMilliseconds(Environment.TickCount64));
+        // Взлёт/посадка сбрасывают допуск: не восстанавливаем оси из старого снимка.
+        ready = gamepadInput.IsReady;
         flightInput.SetLeft(ready ? state.Left : default);
         flightInput.SetRight(ready ? state.Right : default);
         FlightControls.IsEnabled = ready;
         InputStatusText.Text = state.Name + (ready
             ? "\nУправление стиками включено."
             : "\nОтпустите оба стика на 0,3 секунды.");
+    }
+
+    private void ApplyGamepadActions(GamepadActions actions)
+    {
+        if (actions.HasFlag(GamepadActions.Stop))
+        {
+            if (droneLink != null)
+            {
+                StopMotors();
+            }
+            return;
+        }
+
+        if (actions.HasFlag(GamepadActions.NextSpeed))
+        {
+            Power.Value = FlightInput.NextSpeed(Power.Value);
+        }
+
+        if (actions.HasFlag(GamepadActions.Land))
+        {
+            StartFlightAction(FlightFlags.Land);
+        }
+        else if (actions.HasFlag(GamepadActions.Takeoff))
+        {
+            StartFlightAction(FlightFlags.Takeoff);
+        }
     }
 
     private void ResetInput()
@@ -278,13 +315,17 @@ public partial class MainWindow : Window
         // ArmChanged очищает команду; остановку сохраняем даже при смене фокуса.
         bool stopping = IsStopping;
         Armed.IsChecked = false;
+        gamepadButtons.Reset();
         ResetInput();
         activeCommand = stopping ? FlightFlags.Stop : FlightFlags.None;
 
         shouldSendNeutral = droneLink?.HasControlActivity == true;
     }
 
-    private void ActionClicked(object sender, RoutedEventArgs e)
+    private void ActionClicked(object sender, RoutedEventArgs e) =>
+        StartFlightAction((FlightFlags)byte.Parse((string)((Button)sender).Tag));
+
+    private void StartFlightAction(FlightFlags command)
     {
         if (droneLink?.Responding != true || Armed.IsChecked != true || IsStopping ||
             (IsGamepadMode && !gamepadInput.IsReady))
@@ -294,12 +335,14 @@ public partial class MainWindow : Window
 
         ResetInput();
         RefreshInputAvailability();
-        activeCommand = (FlightFlags)byte.Parse((string)((Button)sender).Tag);
+        activeCommand = command;
         commandExpiresAt = Environment.TickCount64 + 1000;
         Notice(activeCommand == FlightFlags.Takeoff ? "Отправляется команда взлёта." : "Отправляется команда посадки.");
     }
 
-    private void EmergencyClicked(object sender, RoutedEventArgs e)
+    private void EmergencyClicked(object sender, RoutedEventArgs e) => StopMotors();
+
+    private void StopMotors()
     {
         ResetInput();
         Armed.IsChecked = false;
@@ -320,6 +363,7 @@ public partial class MainWindow : Window
         ConnectButton.IsEnabled = false;
         try
         {
+            gamepadButtons.Reset();
             ResetInput();
             Armed.IsChecked = false;
             activeCommand = 0;

@@ -78,7 +78,24 @@ public sealed class SdlGamepad : IDisposable
         var right = GamepadInput.Normalize(
             SDL.GetGamepadAxis(handle, SDL.GamepadAxis.RightX),
             SDL.GetGamepadAxis(handle, SDL.GamepadAxis.RightY));
-        return new GamepadState(deviceId, deviceName, left, right);
+        var buttons = GamepadButtons.None;
+        if (SDL.GetGamepadButton(handle, SDL.GamepadButton.LeftShoulder))
+        {
+            buttons |= GamepadButtons.LeftShoulder;
+        }
+        if (SDL.GetGamepadButton(handle, SDL.GamepadButton.DPadUp))
+        {
+            buttons |= GamepadButtons.DpadUp;
+        }
+        if (SDL.GetGamepadButton(handle, SDL.GamepadButton.DPadDown))
+        {
+            buttons |= GamepadButtons.DpadDown;
+        }
+        if (SDL.GetGamepadButton(handle, SDL.GamepadButton.East))
+        {
+            buttons |= GamepadButtons.B;
+        }
+        return new GamepadState(deviceId, deviceName, left, right, buttons);
     }
 
     private bool EnsureInitialized()

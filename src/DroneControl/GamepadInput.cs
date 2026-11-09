@@ -1,6 +1,80 @@
 namespace DroneControl;
 
-public readonly record struct GamepadState(uint DeviceId, string Name, StickPosition Left, StickPosition Right);
+[Flags]
+public enum GamepadButtons
+{
+    None = 0,
+    LeftShoulder = 1,
+    DpadUp = 2,
+    DpadDown = 4,
+    B = 8
+}
+
+[Flags]
+public enum GamepadActions
+{
+    None = 0,
+    NextSpeed = 1,
+    Takeoff = 2,
+    Land = 4,
+    Stop = 8
+}
+
+public readonly record struct GamepadState(
+    uint DeviceId, string Name, StickPosition Left, StickPosition Right,
+    GamepadButtons Buttons = GamepadButtons.None);
+
+/// <summary>Разовые нажатия. Центрирование стиков не сбрасывает историю кнопок.</summary>
+public sealed class GamepadButtonInput
+{
+    private uint? deviceId;
+    private GamepadButtons previousButtons;
+
+    public GamepadActions Update(GamepadState? snapshot, bool isActive, bool canFly)
+    {
+        if (!isActive || snapshot is not { } state)
+        {
+            Reset();
+            return GamepadActions.None;
+        }
+
+        // Уже зажатые при подключении или возврате фокуса кнопки нужно отпустить.
+        var pressed = deviceId == state.DeviceId
+            ? state.Buttons & ~previousButtons
+            : GamepadButtons.None;
+        deviceId = state.DeviceId;
+        previousButtons = state.Buttons;
+
+        if (state.Buttons.HasFlag(GamepadButtons.B))
+        {
+            return pressed.HasFlag(GamepadButtons.B) ? GamepadActions.Stop : GamepadActions.None;
+        }
+
+        var actions = pressed.HasFlag(GamepadButtons.LeftShoulder)
+            ? GamepadActions.NextSpeed : GamepadActions.None;
+        if (canFly)
+        {
+            // При конфликте направлений приоритет у посадки.
+            if (pressed.HasFlag(GamepadButtons.DpadDown))
+            {
+                actions |= GamepadActions.Land;
+            }
+            else if (pressed.HasFlag(GamepadButtons.DpadUp) &&
+                     !state.Buttons.HasFlag(GamepadButtons.DpadDown))
+            {
+                actions |= GamepadActions.Takeoff;
+            }
+        }
+
+        return actions;
+    }
+
+    public void Reset()
+    {
+        deviceId = null;
+        previousButtons = GamepadButtons.None;
+    }
+}
 
 /// <summary>Преобразование осей SDL и допуск ввода после непрерывного центрирования.</summary>
 public sealed class GamepadInput

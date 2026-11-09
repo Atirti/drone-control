@@ -53,17 +53,20 @@ public sealed class FlightInput
         Right = default;
     }
 
-    /// <summary>Скорость ограничивает максимальное отклонение; положение стика задаёт его долю.</summary>
+    public static double NextSpeed(double speed) => speed < 60 ? 60 : speed < 100 ? 100 : 30;
+
+    /// <summary>Режимы APK 30/60/100: крен и тангаж ±45/60/127; газ и поворот всегда ±127.</summary>
     public byte[] Packet(double speed, FlightFlags flags = FlightFlags.None)
     {
-        double maximum = 127 * Math.Clamp(double.IsFinite(speed) ? speed : 10, 10, 100) / 100;
-        int Axis(double value) => 128 + (int)Math.Round(maximum * value);
+        int movementRange = speed >= 100 ? 127 : speed >= 60 ? 60 : 45;
+        // DeviceBLFragment.onMove приводит отклонение к int до прибавления нейтрали.
+        static int Axis(double value, int range) => 128 + (int)(range * value);
 
         return Protocol.Flight(
-            roll: Axis(Right.X),
-            pitch: Axis(Right.Y),
-            throttle: Axis(Left.Y),
-            yaw: Axis(Left.X),
+            roll: Axis(Right.X, movementRange),
+            pitch: Axis(Right.Y, movementRange),
+            throttle: Axis(Left.Y, 127),
+            yaw: Axis(Left.X, 127),
             flags: flags);
     }
 }

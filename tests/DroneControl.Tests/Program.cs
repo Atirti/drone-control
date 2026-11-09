@@ -21,6 +21,7 @@ void Check(bool condition, string name)
 VerifyProtocol();
 VerifyFlightInput();
 VerifyGamepadInput();
+VerifyGamepadButtons();
 await VerifyHttpRequestsAsync();
 
 if (!args.Contains("--input-only"))
@@ -83,15 +84,21 @@ void VerifyFlightInput()
         bool otherAxesAreNeutral = Enumerable.Range(1, 4)
             .Where(index => index != axis)
             .All(index => packet[index] == 128);
-        Check(packet[axis] == 128 + sign * 38 && otherAxesAreNeutral, $"stick axis {axis}, sign {sign}");
+        int expected = 128 + sign * (left ? 127 : 45);
+        if (axis == 3 && sign == -1)
+        {
+            expected = 0;
+        }
+        Check(packet[axis] == expected && otherAxesAreNeutral, $"APK low speed axis {axis}, sign {sign}");
         input.Release();
         Check(input.Packet(30).SequenceEqual(Protocol.Flight()), $"release axis {axis}, sign {sign}");
     }
 
     input.SetRight(new StickPosition(1, 0));
-    Check(input.Packet(100)[1] == 255 && input.Packet(10)[1] == 141, "speed slider range");
+    Check(input.Packet(30)[1] == 173 && input.Packet(60)[1] == 188 && input.Packet(100)[1] == 255,
+        "APK speed presets 45, 60, 127");
     input.SetRight(new StickPosition(0.5, 0));
-    Check(input.Packet(100)[1] == 192 && input.Packet(30)[1] == 147, "proportional stick intensity");
+    Check(input.Packet(100)[1] == 191 && input.Packet(30)[1] == 150, "APK fractional axis truncation");
     input.SetRight(new StickPosition(-1, 0));
     Check(input.Packet(100)[1] == 1, "negative axis endpoint");
     input.SetLeft(new StickPosition(0, -1));
@@ -99,7 +106,9 @@ void VerifyFlightInput()
 
     input.SetLeft(new StickPosition(0.6, 0.8));
     input.SetRight(new StickPosition(-0.6, -0.8));
-    Check(input.Packet(100).SequenceEqual(Protocol.Flight(52, 26, 230, 204)), "four simultaneous analog axes");
+    Check(input.Packet(100).SequenceEqual(Protocol.Flight(52, 27, 229, 204)), "four simultaneous analog axes");
+    Check(input.Packet(30)[3] == 229 && input.Packet(60)[4] == 204,
+        "speed never reduces throttle or yaw");
     input.SetLeft(default);
     Check(input.Left.IsCentered && input.Packet(100)[1] == 52, "releasing left keeps right stick");
     input.Release();
@@ -108,6 +117,66 @@ void VerifyFlightInput()
     var diagonal = StickPosition.Normalize(3, 4);
     Check(Math.Abs(diagonal.X - 0.6) < 0.00001 && Math.Abs(diagonal.Y - 0.8) < 0.00001, "circular clamp preserves direction");
     Check(StickPosition.Normalize(double.NaN, 1).IsCentered, "nonfinite input resets to neutral");
+
+    Check(FlightInput.NextSpeed(30) == 60 && FlightInput.NextSpeed(60) == 100 &&
+          FlightInput.NextSpeed(100) == 30, "LB preset cycle 30 to 60 to 100 to 30");
+    input.Release();
+    input.SetRight(new StickPosition(-1, 0));
+    Check(input.Packet(30)[1] == 83 && input.Packet(60)[1] == 68,
+        "APK negative preset endpoints");
+    Check(input.Packet(double.NaN)[1] == 83, "invalid speed falls back to low preset");
+}
+
+void VerifyGamepadButtons()
+{
+    var buttons = new GamepadButtonInput();
+    var state = new GamepadState(1, "Test", default, default);
+    GamepadActions Read(GamepadButtons held, bool canFly = true, bool active = true) =>
+        buttons.Update(state with { Buttons = held }, active, canFly);
+
+    Check(Read(GamepadButtons.DpadUp) == GamepadActions.None, "held takeoff on connection suppressed");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.LeftShoulder, canFly: false) == GamepadActions.NextSpeed,
+        "LB changes speed even in preview");
+    Check(Read(GamepadButtons.LeftShoulder) == GamepadActions.None, "held LB does not repeat");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.LeftShoulder) == GamepadActions.NextSpeed, "LB release allows next press");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.DpadUp) == GamepadActions.Takeoff, "D-pad up takes off");
+    Check(Read(GamepadButtons.DpadUp) == GamepadActions.None, "held takeoff does not repeat");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.DpadDown) == GamepadActions.Land, "D-pad down lands");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.DpadUp, canFly: false) == GamepadActions.None &&
+          Read(GamepadButtons.DpadUp) == GamepadActions.None,
+        "takeoff pressed before arming or centering is not queued");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.DpadDown, canFly: false) == GamepadActions.None, "landing requires ready control");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.B, canFly: false) == GamepadActions.Stop, "B stops without arming or centering");
+    Check(Read(GamepadButtons.B) == GamepadActions.None, "held stop does not extend pulse");
+    Check(Read(GamepadButtons.B | GamepadButtons.DpadUp | GamepadButtons.LeftShoulder) == GamepadActions.None,
+        "holding B suppresses new speed and takeoff presses");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.B | GamepadButtons.DpadDown | GamepadButtons.LeftShoulder) == GamepadActions.Stop,
+        "stop takes precedence over all actions");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.DpadDown | GamepadButtons.DpadUp) == GamepadActions.Land,
+        "landing takes precedence over takeoff");
+    Read(GamepadButtons.None);
+    Read(GamepadButtons.DpadDown);
+    Check(Read(GamepadButtons.DpadDown | GamepadButtons.DpadUp) == GamepadActions.None,
+        "held down blocks conflicting takeoff");
+    Check(Read(GamepadButtons.B, active: false) == GamepadActions.None &&
+          Read(GamepadButtons.B) == GamepadActions.None, "background press and held focus return ignored");
+    Read(GamepadButtons.None);
+    Check(Read(GamepadButtons.B) == GamepadActions.Stop, "fresh B after focus return works");
+    buttons.Update(null, true, true);
+    Check(Read(GamepadButtons.LeftShoulder) == GamepadActions.None, "held LB on reconnection suppressed");
+    state = state with { DeviceId = 2 };
+    Check(Read(GamepadButtons.B) == GamepadActions.None, "device replacement suppresses held buttons");
+    buttons.Reset();
+    Check(Read(GamepadButtons.DpadUp) == GamepadActions.None, "source reset suppresses held takeoff");
 }
 
 void VerifyGamepadInput()
