@@ -2,8 +2,6 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using DroneControl;
-using DroneVideoBridge;
-using System.Text;
 
 int checks = 0;
 
@@ -22,7 +20,6 @@ VerifyProtocol();
 VerifyFlightInput();
 VerifyGamepadInput();
 VerifyGamepadButtons();
-await VerifyHttpRequestsAsync();
 
 if (!args.Contains("--input-only"))
 {
@@ -273,19 +270,6 @@ async Task VerifyTransportAsync()
     Check(!failingLink.Responding, "repeated disposal is safe and link stays inactive");
 }
 
-async Task VerifyHttpRequestsAsync()
-{
-    using var valid = new FragmentedStream(Encoding.ASCII.GetBytes("GET /video.mjpg HTTP/1.1\r\nHost: localhost\r\n\r\n"));
-    Check(await MjpegRequest.IsVideoRequestAsync(valid, CancellationToken.None), "fragmented HTTP headers accepted");
-    using var wrongPath = new MemoryStream("GET / HTTP/1.1\r\n\r\n"u8.ToArray());
-    Check(!await MjpegRequest.IsVideoRequestAsync(wrongPath, CancellationToken.None), "other HTTP path rejected");
-    using var incomplete = new MemoryStream("GET /video.mjpg HTTP/1.1\r\nHost: local"u8.ToArray());
-    Check(!await MjpegRequest.IsVideoRequestAsync(incomplete, CancellationToken.None), "truncated HTTP headers rejected");
-    using var oversized = new MemoryStream(Enumerable.Repeat((byte)'A', 10000).ToArray());
-    Check(!await MjpegRequest.IsVideoRequestAsync(oversized, CancellationToken.None) && oversized.Position == 8192,
-        "unterminated HTTP line cannot read beyond 8 KiB");
-}
-
 void VerifyFrameAssembly()
 {
     Check(!Protocol.ValidBl(new byte[] { 147, 1, 5, 0 }), "reject inconsistent BL length");
@@ -327,10 +311,4 @@ void VerifyFrameAssembly()
         assembler.Acknowledgement is { Length: 60 } ack &&
         ack[0] == 239 && ack[1] == 2 && ack[8] == 1 && ack[40] == 1 && ack[48] == 3,
         "BL complete-frame ACK");
-}
-
-sealed class FragmentedStream(byte[] data) : MemoryStream(data)
-{
-    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
-        base.ReadAsync(buffer[..Math.Min(3, buffer.Length)], cancellationToken);
 }

@@ -1,7 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/DroneControl/DroneControl.csproj" />
-    <Project Path="src/DroneVideoBridge/DroneVideoBridge.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DroneControl.Tests/DroneControl.Tests.csproj" />

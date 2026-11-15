@@ -11,6 +11,5 @@
         <Compile Include="../../src/DroneControl/Protocol.cs" Link="Protocol.cs" />
         <Compile Include="../../src/DroneControl/DroneLink.cs" Link="DroneLink.cs" />
         <Compile Include="../../src/DroneControl/BlFrames.cs" Link="BlFrames.cs" />
-        <Compile Include="../../src/DroneVideoBridge/MjpegRequest.cs" Link="MjpegRequest.cs" />
     </ItemGroup>
 </Project>
